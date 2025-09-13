@@ -1,1 +1,107 @@
+/*********************************************************************
+  ESP32 SIGNAL-GENERATOR DEMO  –  SINE  |  Freq +/–  |  Amp +/–
+
+  ▸ OLED: SH1106 128×64, I²C  (SCL→GPIO22, SDA→GPIO21, VDD→3V3, GND)
+  ▸ Buttons (INPUT_PULLUP)
+      - GPIO32  :  Frequency ↑
+      - GPIO33  :  Frequency ↓
+      - GPIO26  :  Amplitude ↑
+      - GPIO27  :  Amplitude ↓
+  ▸ DAC output: GPIO25  (connect to RC filter / piezo / scope)
+*********************************************************************/
+
+#include <U8g2lib.h>
+#include <Wire.h>
+#include <driver/dac.h>
+#include <math.h>
+
+/* ─────────── OLED ─────────── */
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+
+/* ────── Wave-table / DAC ───── */
+const uint16_t LUT_LEN = 256;            // must be power of two
+uint8_t        sineLUT[LUT_LEN];
+
+volatile uint16_t lutIndex  = 0;         // phase index
+volatile uint16_t step      = 4;         // freq control (1–64)
+volatile uint8_t  ampScale  = 255;       // amp 0–255   (100 %, 50 % ≈128)
+
+hw_timer_t* timer = nullptr;
+
+/* ────── DAC ISR (runs @ 43 kHz) ───── */
+void IRAM_ATTR onTimer()
+{
+  uint8_t raw = sineLUT[lutIndex];               // 0–255
+  uint8_t scaled = (raw * ampScale) >> 8;        // 8-bit scale
+  dac_output_voltage(DAC_CHAN_0, scaled);        // GPIO25
+
+  lutIndex = (lutIndex + step) & (LUT_LEN - 1);  // wrap
+}
+
+/* ─────────── Setup ─────────── */
+void setup()
+{
+
+  //Serial.begin(115200);
+  delay(1000);
+  /* Build sine LUT */
+  for (uint16_t i = 0; i < LUT_LEN; ++i)
+    sineLUT[i] = 127.5 + 127.5 * sin(2 * PI * i / LUT_LEN);
+
+  /* Enable DAC */
+  dac_output_enable(DAC_CHAN_0);   // GPIO25
+
+  /* Start timer ~43 kHz */
+  timer = timerBegin(43000);       // core-3.x API: frequency only
+  timerAttachInterrupt(timer, &onTimer);
+
+  /* Button pins */
+  pinMode(32, INPUT_PULLUP);  // freq ↑
+  pinMode(33, INPUT_PULLUP);  // freq ↓
+  pinMode(26, INPUT_PULLUP);  // amp  ↑
+  pinMode(27, INPUT_PULLUP);  // amp  ↓
+
+  /* OLED init */
+  u8g2.begin();
+}
+
+/* ─────────── Main loop ─────────── */
+void loop()
+{
+  /* Handle buttons (debounced by simple delay) */
+  if (!digitalRead(32) && step < 64) { step++; delay(120); }
+  if (!digitalRead(33) && step > 1 ) { step--; delay(120); }
+
+  if (!digitalRead(26) && ampScale <= 223) { ampScale += 32; delay(120); } // +12.5 %
+  if (!digitalRead(27) && ampScale >= 32 ) { ampScale -= 32; delay(120); } // –12.5 %
+
+  /* Calculate frequency (rough) */
+  float freqHz = (43000.0 / LUT_LEN) * step;
+
+  /* ── Draw info and waveform ── */
+  u8g2.clearBuffer();
+
+  u8g2.setFont(u8g2_font_5x8_tr);
+  u8g2.setCursor(0, 8);
+  u8g2.printf("Sine  %.1f Hz", freqHz);
+
+  u8g2.setCursor(0, 18);
+  u8g2.printf("Amp  %d %%", (ampScale * 100) / 255);
+
+  Serial.printf("Sine  %.1f Hz | Amp %d %%\n", freqHz, (ampScale * 100) / 255);
+
+  /* Fixed-time window waveform: advance by real step */
+  uint16_t phase = 0;
+  for (uint8_t x = 0; x < 128; x++) {
+    uint8_t sample = sineLUT[phase & (LUT_LEN - 1)];
+    uint8_t y = 63 - (sample >> 2);           // map 0–255 → 0–63
+    u8g2.drawPixel(x, y);
+    phase += step;
+    
+  }
+
+  u8g2.sendBuffer();
+
+  delay(80);   // ~12 fps refresh
+}
 
